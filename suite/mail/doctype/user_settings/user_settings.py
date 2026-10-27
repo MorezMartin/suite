@@ -16,6 +16,7 @@ from jmap.auth import BasicAuth
 from jmap.core.retry import RetryPolicy
 
 from suite.mail.doctype.jmap_account.jmap_account import sync_jmap_accounts
+from suite.mail.frappe_mail_provisioning import ensure_frappe_mail_account
 from suite.mail.jmap import (
     DEFAULT_TIMEOUT,
     SuiteJMAPClient,
@@ -133,6 +134,7 @@ class UserSettings(OwnerFromUser, Document):
     def on_update(self) -> None:
         if client := self.client:
             sync_jmap_accounts(self.user, client.session.raw.get("accounts") or {})
+            ensure_frappe_mail_account(self.user)
 
     @frappe.whitelist()
     def sync_accounts(self) -> None:
