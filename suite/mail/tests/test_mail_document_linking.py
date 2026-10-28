@@ -288,7 +288,7 @@ class TestMailDocumentLinking(IntegrationTestCase):
                 "recipients": [{"recipient": "outer@example.test", "status": "Sent"}],
             }
         ).insert(ignore_permissions=True)
-        parent_communication = frappe.get_doc(
+        frappe.get_doc(
             {
                 "doctype": "Communication",
                 "communication_type": "Communication",
