@@ -23,10 +23,12 @@
 			</Button>
 		</AdaptiveDropdown>
 	</div>
+
+	<LinkToDocumentsModal v-model="showLinkDialog" :mail-name="mail.name" />
 </template>
 
 <script lang="ts" setup>
-import { h, inject } from 'vue'
+import { h, inject, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
 	Ban,
@@ -39,6 +41,7 @@ import {
 	Forward,
 	ListFilter,
 	LockOpen,
+	Link2,
 	Mail as MailIcon,
 	Reply,
 	ReplyAll,
@@ -51,6 +54,7 @@ import { Button, createResource } from 'frappe-ui'
 
 import { FLAGGED_STAR_STYLE } from '@/apps/mail/constants'
 import AdaptiveDropdown from '@/components/AdaptiveDropdown.vue'
+import LinkToDocumentsModal from '@/apps/mail/components/Modals/LinkToDocumentsModal.vue'
 
 import {
 	downloadUrlAsFile,
@@ -103,6 +107,7 @@ const { accountId: scopeAccountId, mailboxIds, identities, screenedAddresses } =
 const { setUndoAction, undo } = useUndo()
 const { filterBySender } = useFilterBySender()
 const user = inject('$user')
+const showLinkDialog = ref(false)
 
 // A sender is "blocked" when screened with the Reject action (their mail is discarded) — either by their
 // exact address or by a '@domain' entry covering them.
@@ -257,6 +262,12 @@ const moreActions = (mail: Mail): GroupedAction[] => [
 	{
 		group: '',
 		options: [
+			{
+				label: __('Link to Documents'),
+				onClick: () => (showLinkDialog.value = true),
+				icon: Link2,
+				condition: () => !mail.draft && !!mail.message_id,
+			},
 			{
 				label: __('Download Email'),
 				onClick: () => downloadEmail.submit(),

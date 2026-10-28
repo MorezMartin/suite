@@ -23,6 +23,7 @@ from frappe.utils import (
     time_diff_in_seconds,
 )
 
+from suite.mail.api.link import auto_link_new_messages
 from suite.mail.doctype.mail_queue.mail_queue import MailQueue
 from suite.mail.doctype.sieve_script.sieve_script import SCREENER_MAILBOX_NAME
 from suite.mail.doctype.user_account.user_account import get_user_for_jmap_account
@@ -1576,6 +1577,10 @@ def fetch_changes(user: str, account: str, email_state: str | None = None, ctx: 
             logger.info("new-messages-created", count=len(created_ids))
 
             if messages := get_messages(account, ids=created_ids):
+                # Bridge to the Communication world (best-effort, never raises): a reply to mail
+                # this site sent gets a Communication with the parent's reference inherited.
+                auto_link_new_messages(account, messages)
+
                 mailboxes = get_cached_mailboxes(account)
                 subscribed_mailboxes = set([m["id"] for m in mailboxes if m["isSubscribed"]])
                 logger.debug("resolved-subscribed-mailboxes", subscribed_mailboxes=subscribed_mailboxes)
