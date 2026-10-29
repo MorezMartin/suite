@@ -30,7 +30,7 @@ from typing import TypedDict
 
 import frappe
 from frappe import _
-from frappe.utils import now, sanitize_html
+from frappe.utils import cint, cstr, now, sanitize_html
 
 from suite.mail.doctype.user_account.user_account import get_user_for_jmap_account
 from suite.mail.utils import log_mail_error
@@ -412,6 +412,209 @@ def get_message_document_links(name: str) -> list[dict]:
         for l in communication.timeline_links
         if frappe.has_permission(l.link_doctype, ptype="read", doc=l.link_name)
     ]
+
+
+# --------------------------------------------------------------------------- link panel (v2)
+
+STATUS_FIELDNAMES = ("status", "workflow_status", "document_status")
+PREVIEW_FIELDTYPES = {"Data", "Small Text", "Text", "Long Text", "Text Editor", "Int", "Float", "Currency"}
+PREVIEW_SKIP_FIELDS = {"name", "subject", "description", "content"}
+# A link is display-only data: cheap columns only. Large Text/Text Editor cells make Mail
+# Message fetches balloon (some doctypes store megabytes in a single row).
+PREVIEW_SELECT_LIMIT = 8
+
+
+def _status_field(doctype: str) -> str | None:
+    meta = frappe.get_meta(doctype)
+    for fieldname in STATUS_FIELDNAMES:
+        if meta.has_field(fieldname):
+            return fieldname
+    return None
+
+
+def _linked_documents_view(communication) -> list[dict]:
+    """Communication timeline links + its reference, merged, previews attached.
+
+    The reference (``reference_doctype``/``reference_name`` — set automatically by the
+    In-Reply-To machinery or at creation) is prepended when the timeline has no row for it
+    yet, as ``source: "auto"``. Timeline rows are ``source: "manual"`` (the Link-to-Documents
+    action writes them). Readable-only: a link the user cannot read does not show, and never
+    says why.
+    """
+
+    rows: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    if communication.reference_doctype and communication.reference_name:
+        reference = (communication.reference_doctype, communication.reference_name)
+        if frappe.db.exists(reference[0], reference[1]) and frappe.has_permission(
+            reference[0], ptype="read", doc=reference[1]
+        ):
+            seen.add(reference)
+            rows.append(_link_entry(reference[0], reference[1], None, "auto"))
+
+    for link in communication.timeline_links:
+        key = (link.link_doctype, link.link_name)
+        if key in seen:
+            continue
+        if not frappe.has_permission(link.link_doctype, ptype="read", doc=link.link_name):
+            continue
+        seen.add(key)
+        rows.append(_link_entry(link.link_doctype, link.link_name, link.link_title, "manual"))
+
+    for row in rows:
+        _attach_preview(row)
+    return rows
+
+
+def _link_entry(doctype: str, name: str, title: str | None, source: str) -> dict:
+    meta = frappe.get_meta(doctype)
+    display = (title or "").strip()
+    if not display:
+        title_field = meta.get_title_field()
+        display = (
+            frappe.db.get_value(doctype, name, title_field, order_by=None, cache=True) if title_field else None
+        )
+    return {
+        "doctype": doctype,
+        "name": name,
+        "title": display or name,
+        "doctype_label": meta.get("label") or doctype,
+        "source": source,
+    }
+
+
+def _attach_preview(row: dict) -> None:
+    """Cheap display fields for the panel card: status + first short non-empty fields.
+
+    Deliberately narrow (typed subset, short values, bounded count) — never a get_doc on a
+    document the mail client has no reason to fully load.
+    """
+
+    doctype, name = row["doctype"], row["name"]
+    meta = frappe.get_meta(doctype)
+    select, status_fieldname = [], _status_field(doctype)
+    if status_fieldname:
+        select.append(status_fieldname)
+    for f in meta.fields:
+        if (
+            f.fieldname not in PREVIEW_SKIP_FIELDS
+            and f.fieldname != status_fieldname
+            and f.fieldtype in PREVIEW_FIELDTYPES
+            and not f.hidden
+            and f.no_copy != 1
+            and (f.search_index or f.in_list_view)
+        ):
+            select.append(f.fieldname)
+        if len(select) >= PREVIEW_SELECT_LIMIT:
+            break
+    if not select:
+        return
+
+    values = frappe.db.get_value(doctype, name, select, order_by=None, as_dict=True) or {}
+    if status_fieldname:
+        status = values.pop(status_fieldname, None)
+        if status:
+            row["status"] = cstr(status)
+
+    preview = []
+    for fieldname, value in values.items():
+        if value in (None, "", 0):
+            continue
+        label = meta.get_label(fieldname)
+        preview.append({"label": label, "value": cstr(value)[:80]})
+        if len(preview) >= 3:
+            break
+    if preview:
+        row["preview"] = preview
+
+
+@frappe.whitelist()
+def get_message_linked_documents(name: str) -> list[dict]:
+    """The panel's payload: documents linked to a Mail Message (manual + automatic)."""
+
+    doc = frappe.get_doc("Mail Message", name)
+    get_user_for_jmap_account(doc.account, allow_system_manager=False, raise_exception=True)
+
+    communication = get_communication_for_message(doc)
+    if not communication:
+        return []
+    return _linked_documents_view(communication)
+
+
+@frappe.whitelist()
+def unlink_document(name: str, doctype: str, docname: str | None = None) -> list[dict]:
+    """Removes one link between a Mail Message and a document.
+
+    Accepts the panel's naming (``doctype``/``name``) and core's (``doctype``/``docname``).
+    Deleting a timeline row lifts the link everywhere it surfaced; when the deleted row was
+    the last one for what the Communication also references, the reference fields are
+    cleared too — the unlink must not re-surface the document through the reference.
+    Unlinking a reference with no timeline row (pure auto-link) just clears the reference.
+    A link to the Communication itself (a mail pointed at a mail) is refused: it is the
+    thread, not a link.
+    """
+
+    if not docname:
+        frappe.throw(_("A document name is required."))
+
+    doc = frappe.get_doc("Mail Message", name)
+    get_user_for_jmap_account(doc.account, allow_system_manager=False, raise_exception=True)
+
+    communication = get_communication_for_message(doc)
+    if not communication:
+        frappe.throw(_("This message has no linked documents."))
+
+    if doctype == "Communication":
+        frappe.throw(_("A mail cannot be unlinked from the mail it threads to."))
+
+    # Mirror the linking gate: only a user who can read the target may unlink it — dropping
+    # a row would otherwise edit a timeline the caller cannot see.
+    frappe.has_permission(doctype, ptype="read", doc=docname, throw=True)
+
+    targets = [l for l in communication.timeline_links if l.link_doctype == doctype and l.link_name == docname]
+    for l in targets:
+        communication.timeline_links.remove(l)
+    if (communication.reference_doctype, communication.reference_name) == (doctype, docname):
+        communication.reference_doctype = None
+        communication.reference_name = None
+    if not targets and (communication.reference_doctype, communication.reference_name) != (doctype, docname):
+        frappe.throw(_("This message is not linked to {0} {1}.").format(frappe.bold(doctype), frappe.bold(docname)))
+
+    communication.save(ignore_permissions=True)
+    return _linked_documents_view(communication)
+
+
+@frappe.whitelist()
+def search_linkable_doctypes(txt: str, limit: int = 15) -> list[dict]:
+    """DocTypes the user may link a mail to, for the Link-to-Documents combobox.
+
+    Mirrors what the Desk awesomebar can see: readable standalone doctypes with a title.
+    ``search_link`` (documents within a doctype) keeps its own permission path — this only
+    fills the doctype step the modal currently leaves free-text.
+    """
+
+    txt = (txt or "").strip().lower()
+    if not txt:
+        return []
+
+    allowed = [
+        doctype
+        for doctype in frappe.get_all("DocType", {"istable": 0, "track_views": ("!=", 1)}, pluck="name")
+        if frappe.has_permission(doctype, "read")
+        and not doctype.startswith("DocType ")
+        and doctype not in {"Communication", "Communication Link", "Email Queue", "Email Queue Recipient"}
+    ]
+
+    matches = []
+    for doctype in allowed:
+        meta = frappe.get_meta(doctype)
+        label = (meta.get("label") or doctype).lower()
+        if txt in doctype.lower() or txt in label:
+            matches.append({"doctype": doctype, "label": meta.get("label") or doctype})
+        if len(matches) >= cint(limit):
+            break
+    return matches
 
 
 def auto_link_incoming_message(doc) -> str | None:

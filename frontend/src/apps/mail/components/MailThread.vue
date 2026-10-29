@@ -492,6 +492,12 @@
 											/>
 										</div>
 									</div>
+									<LinkedDocumentsChip
+										v-if="!mail.draft && mail.message_id"
+										class="mt-3"
+										:mail="mail"
+										@open="openLinkedDocuments(mail)"
+									/>
 								</div>
 							</template>
 						</div>
@@ -556,6 +562,10 @@
 			:initial-index="attachmentIndex"
 			:account="scopeAccountId"
 		/>
+		<LinkedDocumentsDrawer
+			v-model:open="linkedDocsOpen"
+			:mail="linkedDocsMail ?? thread[0]"
+		/>
 	</div>
 
 	<div v-else class="h-full overflow-hidden p-5">
@@ -610,6 +620,8 @@ import { provideAccountScope } from '@/apps/mail/utils/accountScope'
 import { userStore } from '@/apps/mail/stores/user'
 import AttachmentCapsule from '@/apps/mail/components/AttachmentCapsule.vue'
 import AttachmentViewer from '@/apps/mail/components/AttachmentViewer.vue'
+import LinkedDocumentsChip from '@/apps/mail/components/LinkedDocumentsChip.vue'
+import LinkedDocumentsDrawer from '@/apps/mail/components/LinkedDocumentsDrawer.vue'
 import CalendarInviteBanner from '@/apps/mail/components/CalendarInviteBanner.vue'
 import ComposeMailEditor from '@/apps/mail/components/ComposeMailEditor.vue'
 import DeliveryStatusBanner from '@/apps/mail/components/DeliveryStatusBanner.vue'
@@ -1144,6 +1156,15 @@ const icsAttachment = (mail: Mail) =>
 	)
 
 const showAttachmentViewer = ref(false)
+
+// Linked-documents panel: the chip lives on each message card; the drawer is one per
+// pane and gets re-scoped to whichever message opened it.
+const linkedDocsOpen = ref(false)
+const linkedDocsMail = ref<Mail | null>(null)
+function openLinkedDocuments(mail: Mail) {
+	linkedDocsMail.value = mail
+	linkedDocsOpen.value = true
+}
 const attachments = ref<Attachment[]>([])
 const attachmentIndex = ref(0)
 

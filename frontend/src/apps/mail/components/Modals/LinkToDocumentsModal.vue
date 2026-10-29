@@ -27,11 +27,17 @@
 
 				<div class="flex items-end gap-2">
 					<div class="min-w-0 grow">
-						<FormControl
+						<Combobox
 							v-model="row.doctype"
+							v-model:open="showDoctypeSuggestions"
 							:label="__('DocType')"
 							:placeholder="__('Sales Invoice')"
-						/>
+							:options="doctypeOptions"
+							:open-on-click="false"
+							@update:query="searchDoctypes"
+						>
+							<template #item-create="{ query }">{{ query }}</template>
+						</Combobox>
 					</div>
 					<div class="min-w-0 grow">
 						<Combobox
@@ -77,7 +83,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
-import { Button, Combobox, Dialog, ErrorMessage, FormControl, createResource } from 'frappe-ui'
+import { Button, Combobox, Dialog, ErrorMessage, createResource } from 'frappe-ui'
 import { X } from 'lucide-vue-next'
 
 import { raiseToast } from '@/apps/mail/utils'
@@ -101,6 +107,45 @@ const links = ref<DocumentLink[]>([])
 const doctypeValid = (doctype: string) => /^[A-Za-z0-9 _-]+$/.test(doctype?.trim() ?? '')
 const searchText = ref('')
 const showDocSuggestions = ref(false)
+
+// The doctype step suggests readable doctypes (same list the awesomebar can see) instead of
+// free text; typing something off-list still submits — the server re-validates either way.
+const doctypeQuery = ref('')
+const showDoctypeSuggestions = ref(false)
+const doctypeSearch = createResource({
+	url: 'suite.mail.api.link.search_linkable_doctypes',
+	auto: false,
+	makeParams: () => ({ txt: doctypeQuery.value }),
+	transform: (data: { doctype: string; label: string }[]) =>
+		data.map((o) => ({ value: o.doctype, label: `${o.label} (${o.doctype})` })),
+})
+const fetchDoctypes = useDebounceFn(() => {
+	if (doctypeQuery.value.trim()) doctypeSearch.fetch()
+}, 250)
+const searchDoctypes = (text: string) => {
+	doctypeQuery.value = text
+	if (!text) showDoctypeSuggestions.value = false
+	fetchDoctypes()
+}
+watch(showDoctypeSuggestions, (open) => {
+	if (open && !doctypeQuery.value) showDoctypeSuggestions.value = false
+})
+const doctypeOptions = computed(() => {
+	if (!doctypeQuery.value) return []
+	return [
+		...(doctypeSearch.data ?? []),
+		{
+			type: 'custom',
+			slot: 'create',
+			condition: () =>
+				!!doctypeQuery.value &&
+				!doctypeSearch.data?.some((o: { value: string }) => o.value === doctypeQuery.value.trim()),
+			onClick: ({ query }: { query: string }) => {
+				row.doctype = query
+			},
+		},
+	]
+})
 
 const docSearch = createResource({
 	url: 'frappe.desk.search.search_link',

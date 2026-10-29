@@ -14,10 +14,13 @@ from suite.mail.api.link import (
     auto_link_incoming_message,
     find_parent_communication,
     find_parent_email_queue,
+    get_message_linked_documents,
     is_reply_to_system_sent_mail,
     link_to_documents,
     referenced_message_ids,
+    search_linkable_doctypes,
     split_message_id,
+    unlink_document,
     validate_document_link_target,
 )
 
@@ -345,3 +348,87 @@ class TestMailDocumentLinking(IntegrationTestCase):
             email_type="Sent",
         )
         self.assertIsNone(auto_link_incoming_message(sent_copy))
+
+    # --- linked documents panel (v2) ------------------------------------------
+
+    def _panel(self, doc):
+        get_doc_patch, account_patch = self._bridge_patches(doc)
+        with get_doc_patch, account_patch:
+            return get_message_linked_documents(doc.name)
+
+    def _unlink(self, doc, doctype, docname):
+        get_doc_patch, account_patch = self._bridge_patches(doc)
+        with get_doc_patch, account_patch:
+            return unlink_document(doc.name, doctype, docname)
+
+    def test_panel_merges_reference_and_timeline_links(self):
+        doc = FakeMailMessage()
+        self._link(doc, [{"doctype": "Contact", "name": self.contact.name}])
+        # reference (ToDo) was set at creation as fallback; Contact is a timeline row.
+        rows = self._panel(doc)
+        by_key = {(r["doctype"], r["name"]): r for r in rows}
+        self.assertIn(("ToDo", self.todo.name), by_key)
+        self.assertIn(("Contact", self.contact.name), by_key)
+        self.assertEqual(by_key[("ToDo", self.todo.name)]["source"], "auto")
+        self.assertEqual(by_key[("Contact", self.contact.name)]["source"], "manual")
+
+    def test_panel_deduplicates_reference_and_link(self):
+        doc = FakeMailMessage()
+        self._link(doc, [{"doctype": "ToDo", "name": self.todo.name}])
+        rows = self._panel(doc)
+        todo_rows = [r for r in rows if (r["doctype"], r["name"]) == ("ToDo", self.todo.name)]
+        self.assertEqual(len(todo_rows), 1)
+
+    def test_unlink_removes_manual_link(self):
+        doc = FakeMailMessage()
+        self._link(doc, [{"doctype": "Contact", "name": self.contact.name}])
+        rows = self._unlink(doc, "Contact", self.contact.name)
+        self.assertNotIn(("Contact", self.contact.name), {(r["doctype"], r["name"]) for r in rows})
+
+    def test_unlink_of_reference_clears_it_with_its_row(self):
+        doc = FakeMailMessage()
+        self._link(doc, [{"doctype": "ToDo", "name": self.todo.name}])
+        rows = self._unlink(doc, "ToDo", self.todo.name)
+        self.assertNotIn(("ToDo", self.todo.name), {(r["doctype"], r["name"]) for r in rows})
+        communication = frappe.get_doc("Communication", {"message_id": doc.message_id})
+        self.assertIsNone(communication.reference_doctype)
+
+    def test_unlink_pure_auto_link_clears_reference_without_row(self):
+        parent = frappe.get_doc(
+            {
+                "doctype": "Communication",
+                "communication_type": "Communication",
+                "communication_medium": "Email",
+                "sent_or_received": "Sent",
+                "sender": "site@example.test",
+                "recipients": "outer@example.test",
+                "subject": "a conversation",
+                "message_id": f"parent-{frappe.generate_hash()}@{frappe.local.site}",
+                "reference_doctype": "ToDo",
+                "reference_name": self.todo.name,
+            }
+        ).insert()
+        reply = FakeMailMessage(
+            message_id=f"reply-{frappe.generate_hash()}@elsewhere.test",
+            in_reply_to=parent.message_id,
+        )
+        auto_link_incoming_message(reply)
+
+        rows = self._panel(reply)
+        self.assertIn(("ToDo", self.todo.name), {(r["doctype"], r["name"]) for r in rows})
+
+        rows = self._unlink(reply, "ToDo", self.todo.name)
+        self.assertNotIn(("ToDo", self.todo.name), {(r["doctype"], r["name"]) for r in rows})
+        communication = frappe.get_doc("Communication", {"message_id": reply.message_id})
+        self.assertIsNone(communication.reference_doctype)
+
+    def test_unlink_unknown_link_raises(self):
+        doc = FakeMailMessage()
+        self._link(doc, [{"doctype": "Contact", "name": self.contact.name}])
+        with self.assertRaises(frappe.ValidationError):
+            self._unlink(doc, "ToDo", self.todo.name)
+
+    def test_search_linkable_doctypes_matches_name_and_label(self):
+        hits = {d["doctype"] for d in search_linkable_doctypes("todo")}
+        self.assertIn("ToDo", hits)
+        self.assertEqual(search_linkable_doctypes(""), [])
