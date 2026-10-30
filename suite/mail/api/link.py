@@ -205,7 +205,9 @@ def build_communication_values(doc, *, user: str | None = None) -> dict:
         "message_id": message_id,
         # in_reply_to is a Link to Communication: it is filled with the parent Communication's
         # name by the caller, never with a raw message-id.
-        "subject": getattr(doc, "subject", None),
+        # Subject is mandatory on Communication (v16) and mail without one is legal: core's
+        # IMAP pipeline stores "(no subject)" for those, so the bridge mirrors that.
+        "subject": getattr(doc, "subject", None) or _("(no subject)"),
         "sender": sender,
         "recipients": joined(getattr(doc, "to", None)) or None,
         "cc": joined(getattr(doc, "cc", None)) or None,
@@ -573,13 +575,15 @@ def unlink_document(name: str, doctype: str, docname: str | None = None) -> list
     frappe.has_permission(doctype, ptype="read", doc=docname, throw=True)
 
     targets = [l for l in communication.timeline_links if l.link_doctype == doctype and l.link_name == docname]
+    was_reference = (communication.reference_doctype, communication.reference_name) == (doctype, docname)
+    if not targets and not was_reference:
+        frappe.throw(_("This message is not linked to {0} {1}.").format(frappe.bold(doctype), frappe.bold(docname)))
+
     for l in targets:
         communication.timeline_links.remove(l)
-    if (communication.reference_doctype, communication.reference_name) == (doctype, docname):
+    if was_reference:
         communication.reference_doctype = None
         communication.reference_name = None
-    if not targets and (communication.reference_doctype, communication.reference_name) != (doctype, docname):
-        frappe.throw(_("This message is not linked to {0} {1}.").format(frappe.bold(doctype), frappe.bold(docname)))
 
     communication.save(ignore_permissions=True)
     return _linked_documents_view(communication)
@@ -630,8 +634,10 @@ def auto_link_incoming_message(doc) -> str | None:
         if not doc.message_id or not doc.in_reply_to:
             return None
 
-        if get_communication_for_message(doc):
-            return None
+        existing = get_communication_for_message(doc)
+        if existing:
+            # Idempotent re-run: report the Communication this mail already holds.
+            return existing.name
 
         in_reply_to = split_message_id(doc.in_reply_to)
         # Cheap gates first: the In-Reply-To must point at this site's mail (core semantics) or

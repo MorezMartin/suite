@@ -90,6 +90,16 @@ class TestMailDocumentLinking(IntegrationTestCase):
         super().setUpClass()
         cls.todo = frappe.get_doc({"doctype": "ToDo", "description": "Mail linking target"}).insert()
         cls.contact = frappe.get_doc({"doctype": "Contact", "first_name": "Link Target"}).insert()
+        # Communication.user is a Link: the bridge resolves the mailbox owner to this user.
+        if not frappe.db.exists("User", "me@example.test"):
+            frappe.get_doc(
+                {
+                    "doctype": "User",
+                    "email": "me@example.test",
+                    "first_name": "Me",
+                    "send_welcome_email": 0,
+                }
+            ).insert(ignore_permissions=True)
 
     # --- helpers --------------------------------------------------------------
 
@@ -150,7 +160,7 @@ class TestMailDocumentLinking(IntegrationTestCase):
         )
 
         linked = {(l["doctype"], l["name"]) for l in result["links"]}
-        self.assertEqual(linked, {("ToDo", self.todo.name)})
+        self.assertIn(("ToDo", self.todo.name), linked)
 
     def test_link_to_documents_is_idempotent(self):
         doc = FakeMailMessage()
@@ -298,6 +308,7 @@ class TestMailDocumentLinking(IntegrationTestCase):
                 "communication_medium": "Email",
                 "sent_or_received": "Sent",
                 "sender": "me@example.test",
+                "subject": "a conversation",
                 "message_id": message_id,
                 "reference_doctype": "Contact",
                 "reference_name": self.contact.name,
@@ -363,8 +374,11 @@ class TestMailDocumentLinking(IntegrationTestCase):
 
     def test_panel_merges_reference_and_timeline_links(self):
         doc = FakeMailMessage()
-        self._link(doc, [{"doctype": "Contact", "name": self.contact.name}])
-        # reference (ToDo) was set at creation as fallback; Contact is a timeline row.
+        # link_to_documents takes the first link as the Communication's reference (core's
+        # parse_email_for_timeline_links semantics) — it surfaces as "auto"; the second is a
+        # plain timeline row, "manual". Core may also link participants' own contacts.
+        self._link(doc, [{"doctype": "ToDo", "name": self.todo.name},
+                         {"doctype": "Contact", "name": self.contact.name}])
         rows = self._panel(doc)
         by_key = {(r["doctype"], r["name"]): r for r in rows}
         self.assertIn(("ToDo", self.todo.name), by_key)
@@ -381,15 +395,21 @@ class TestMailDocumentLinking(IntegrationTestCase):
 
     def test_unlink_removes_manual_link(self):
         doc = FakeMailMessage()
-        self._link(doc, [{"doctype": "Contact", "name": self.contact.name}])
+        self._link(doc, [{"doctype": "ToDo", "name": self.todo.name},
+                         {"doctype": "Contact", "name": self.contact.name}])
         rows = self._unlink(doc, "Contact", self.contact.name)
-        self.assertNotIn(("Contact", self.contact.name), {(r["doctype"], r["name"]) for r in rows})
+        keys = {(r["doctype"], r["name"]) for r in rows}
+        self.assertNotIn(("Contact", self.contact.name), keys)
+        self.assertIn(("ToDo", self.todo.name), keys)
 
     def test_unlink_of_reference_clears_it_with_its_row(self):
         doc = FakeMailMessage()
-        self._link(doc, [{"doctype": "ToDo", "name": self.todo.name}])
+        self._link(doc, [{"doctype": "ToDo", "name": self.todo.name},
+                         {"doctype": "Contact", "name": self.contact.name}])
         rows = self._unlink(doc, "ToDo", self.todo.name)
-        self.assertNotIn(("ToDo", self.todo.name), {(r["doctype"], r["name"]) for r in rows})
+        keys = {(r["doctype"], r["name"]) for r in rows}
+        self.assertNotIn(("ToDo", self.todo.name), keys)
+        self.assertIn(("Contact", self.contact.name), keys)
         communication = frappe.get_doc("Communication", {"message_id": doc.message_id})
         self.assertIsNone(communication.reference_doctype)
 
