@@ -59,6 +59,19 @@
 						</template>
 					</Button>
 				</AdaptiveDropdown>
+				<!-- Direct linked-documents toggle — the panel is a tile of the reading pane, so
+				     one toolbar button opens/closes it without the More menu detour (kept there
+				     too). -->
+				<Button
+					variant="ghost"
+					class="max-sm:!h-8 max-sm:!w-8"
+					:tooltip="__('Linked Documents')"
+					@click="emit('toggleLinkedDocuments')"
+				>
+					<template #icon>
+						<Link2 class="icon max-sm:!h-[18px] max-sm:!w-[18px]" />
+					</template>
+				</Button>
 				<AdaptiveDropdown :options="moreActions">
 					<Button variant="ghost" class="max-sm:!h-8 max-sm:!w-8" :tooltip="__('More')">
 						<template #icon>
@@ -111,6 +124,7 @@ import {
 	FolderInput,
 	FolderMinus,
 	FolderPlus,
+	Link2,
 	Mail as MailIcon,
 	Star,
 	Trash2,
@@ -141,6 +155,7 @@ const emit = defineEmits([
 	'deleteThread',
 	'prevThread',
 	'nextThread',
+	'toggleLinkedDocuments',
 ])
 
 const { isMobile } = useScreenSize()

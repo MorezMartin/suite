@@ -11,10 +11,13 @@ import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from suite.mail.api.link import (
+    _linked_documents_view,
     auto_link_incoming_message,
     find_parent_communication,
     find_parent_email_queue,
+    get_communication_for_message,
     get_message_linked_documents,
+    get_thread_linked_documents,
     is_reply_to_system_sent_mail,
     link_to_documents,
     referenced_message_ids,
@@ -62,7 +65,9 @@ class FakeMailMessage:
     """
 
     def __init__(self, **overrides):
-        self.name = "acct|msg-1"
+        # A distinct name per instance: the discussion-scope calls (``names``) key on it, and two
+        # fakes sharing a name would be one message twice (idempotent skips, wrong added counts).
+        self.name = overrides.pop("name", f"acct|msg-{frappe.generate_hash()}")
         self.account = "acct"
         self.message_id = f"mail-{frappe.generate_hash()}@elsewhere.test"
         self.in_reply_to = None
@@ -103,16 +108,18 @@ class TestMailDocumentLinking(IntegrationTestCase):
 
     # --- helpers --------------------------------------------------------------
 
-    def _bridge_patches(self, doc):
+    def _bridge_patches(self, *docs):
         """Patch frappe.get_doc for ("Mail Message", name) and the account-ownership gate:
-        the stub's ``acct`` is not a JMAP Account row, and account gating itself is covered
-        by the mail app's own tests — here the Communication bridge is what's under test."""
+        the stubs' ``acct`` is not a JMAP Account row, and account gating itself is covered
+        by the mail app's own tests — here the Communication bridge is what's under test.
+        Several fakes may be passed (discussion scope): each routes by its own name."""
 
         real_get_doc = frappe.get_doc
+        by_name = {doc.name: doc for doc in docs}
 
         def fake_get_doc(*args, **kwargs):
             if args and args[0] == "Mail Message":
-                return doc
+                return by_name.get(args[1]) or real_get_doc(*args, **kwargs)
             return real_get_doc(*args, **kwargs)
 
         return (
@@ -370,7 +377,9 @@ class TestMailDocumentLinking(IntegrationTestCase):
     def _unlink(self, doc, doctype, docname):
         get_doc_patch, account_patch = self._bridge_patches(doc)
         with get_doc_patch, account_patch:
-            return unlink_document(doc.name, doctype, docname)
+            result = unlink_document(doc.name, doctype, docname)
+        # unlink_document returns {"removed": n, "links": view} — tests read the view.
+        return result["links"] if isinstance(result, dict) else result
 
     def test_panel_merges_reference_and_timeline_links(self):
         doc = FakeMailMessage()
@@ -447,6 +456,82 @@ class TestMailDocumentLinking(IntegrationTestCase):
         self._link(doc, [{"doctype": "Contact", "name": self.contact.name}])
         with self.assertRaises(frappe.ValidationError):
             self._unlink(doc, "ToDo", self.todo.name)
+
+    # --- discussion scope (v2.1) ----------------------------------------------
+
+    def _thread_panel(self, account, thread_id):
+        """The thread endpoint's payload, patched to this test's fake messages.
+
+        The fake messages live on the JMAP server (not in the database), so fetch_thread is
+        mocked to hand back the same serialized dicts the sync would; the panel logic under
+        test — collapse per document, mail back-reference — runs for real.
+        """
+        return get_thread_linked_documents(account, thread_id)
+
+    def test_link_to_documents_accepts_names_for_a_whole_discussion(self):
+        doc = FakeMailMessage()
+        second = FakeMailMessage()
+        get_doc_patch, account_patch = self._bridge_patches(doc, second)
+
+        with get_doc_patch, account_patch:
+            result = link_to_documents(
+                names=[doc.name, second.name],
+                links=[{"doctype": "ToDo", "name": self.todo.name}],
+            )
+
+        self.assertEqual(result["added"], 2)  # one per message of the discussion
+        # each message's Communication carries the link
+        for fake in (doc, second):
+            communication = frappe.get_doc("Communication", {"message_id": fake.message_id})
+            keys = {(l.link_doctype, l.link_name) for l in communication.timeline_links}
+            self.assertIn(("ToDo", self.todo.name), keys)
+
+    def test_unlink_document_accepts_names_for_a_whole_discussion(self):
+        doc = FakeMailMessage()
+        second = FakeMailMessage()
+        get_doc_patch, account_patch = self._bridge_patches(doc, second)
+        with get_doc_patch, account_patch:
+            link_to_documents(
+                names=[doc.name, second.name],
+                links=[{"doctype": "ToDo", "name": self.todo.name}],
+            )
+            result = unlink_document(
+                names=[doc.name, second.name],
+                doctype="ToDo",
+                docname=self.todo.name,
+            )
+        self.assertEqual(result["removed"], 2)
+        for fake in (doc, second):
+            communication = frappe.get_doc("Communication", {"message_id": fake.message_id})
+            keys = {(l.link_doctype, l.link_name) for l in communication.timeline_links}
+            self.assertNotIn(("ToDo", self.todo.name), keys)
+
+    def test_thread_panel_collapses_rows_and_back_references_the_mail(self):
+        """The discussion view: one row per document across all messages, each carrying the
+        mail it was found on; a document linked on two messages appears once."""
+        doc = FakeMailMessage()
+        second = FakeMailMessage()
+        get_doc_patch, account_patch = self._bridge_patches(doc, second)
+        with get_doc_patch, account_patch:
+            link_to_documents(
+                names=[doc.name, second.name],
+                links=[{"doctype": "ToDo", "name": self.todo.name}],
+            )
+
+        thread_id = "thread-1"
+        with (
+            get_doc_patch,
+            account_patch,
+            unittest.mock.patch(
+                "suite.mail.doctype.mail_message.mail_message.fetch_thread",
+                return_value=[{"name": doc.name}, {"name": second.name}],
+            ),
+        ):
+            rows = self._thread_panel("acct", thread_id)
+
+        todo_rows = [r for r in rows if (r["doctype"], r["name"]) == ("ToDo", self.todo.name)]
+        self.assertEqual(len(todo_rows), 1)
+        self.assertIn(todo_rows[0]["mail"], {doc.name, second.name})
 
     def test_search_linkable_doctypes_matches_name_and_label(self):
         hits = {d["doctype"] for d in search_linkable_doctypes("todo")}

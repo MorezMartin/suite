@@ -16,14 +16,18 @@
 			@delete-thread="emit('deleteThread')"
 			@prev-thread="emit('prevThread')"
 			@next-thread="emit('nextThread')"
+			@toggle-linked-documents="
+				linkedDocsMail = thread[0] ?? null;
+				linkedDocsOpen = !linkedDocsOpen
+			"
 		/>
 		<!-- The swipe slide (`slide` prop) pages only the thread-specific part — subject,
 		     messages, reply bar — while the toolbar above stays put. Keyed per thread on
 		     mobile: the outgoing thread's frozen DOM slides away as the incoming one
 		     slides in. Desktop keys statically, so switching threads never remounts. -->
-		<div class="relative min-h-0 flex-1 overflow-hidden">
+		<div class="relative flex min-h-0 flex-1 overflow-hidden">
 		<Transition :name="slide || ''" @after-enter="emit('slideDone')">
-		<div :key="isMobile ? threadID : 'thread'" class="flex h-full flex-col">
+		<div :key="isMobile ? threadID : 'thread'" class="flex h-full min-w-0 flex-1 flex-col">
 		<!-- Mobile: the subject is part of the fixed chrome — scrolling starts below it,
 		     and its border is the separator content passes under. -->
 		<div v-if="isMobile && thread?.length" class="shrink-0 border-b px-3.5 pb-3.5 pt-1.5">
@@ -546,6 +550,20 @@
 		</div>
 		</div>
 		</Transition>
+		<!-- The linked-documents rail is a tile of the reading row, beside the thread (not an
+		     overlay): the toolbar and every control keep working while it is open. The scope is
+		     the whole conversation; `linkedDocsMail` only highlights the message that opened it.
+		     Desktop-only: mobile keeps its single-column, sliding pane. -->
+		<LinkedDocumentsRail
+			v-if="linkedDocsOpen && !isMobile"
+			:mail="linkedDocsMail ?? thread[0] ?? null"
+			:thread="thread"
+			:account="scopeAccountId"
+			:readonly="readonly"
+			@close="linkedDocsOpen = false"
+			@link="showThreadLinkDialog = true"
+			@open-attachment="openRailAttachment"
+		/>
 		</div>
 		<SendMail
 			v-if="focusedDraft"
@@ -562,9 +580,9 @@
 			:initial-index="attachmentIndex"
 			:account="scopeAccountId"
 		/>
-		<LinkedDocumentsDrawer
-			v-model:open="linkedDocsOpen"
-			:mail="linkedDocsMail ?? thread[0]"
+		<LinkToDocumentsModal
+			v-model="showThreadLinkDialog"
+			:mail-names="thread.filter((m) => !m.draft).map((m) => m.name)"
 		/>
 	</div>
 
@@ -621,7 +639,8 @@ import { userStore } from '@/apps/mail/stores/user'
 import AttachmentCapsule from '@/apps/mail/components/AttachmentCapsule.vue'
 import AttachmentViewer from '@/apps/mail/components/AttachmentViewer.vue'
 import LinkedDocumentsChip from '@/apps/mail/components/LinkedDocumentsChip.vue'
-import LinkedDocumentsDrawer from '@/apps/mail/components/LinkedDocumentsDrawer.vue'
+import LinkedDocumentsRail from '@/apps/mail/components/LinkedDocumentsRail.vue'
+import LinkToDocumentsModal from '@/apps/mail/components/Modals/LinkToDocumentsModal.vue'
 import CalendarInviteBanner from '@/apps/mail/components/CalendarInviteBanner.vue'
 import ComposeMailEditor from '@/apps/mail/components/ComposeMailEditor.vue'
 import DeliveryStatusBanner from '@/apps/mail/components/DeliveryStatusBanner.vue'
@@ -1157,10 +1176,12 @@ const icsAttachment = (mail: Mail) =>
 
 const showAttachmentViewer = ref(false)
 
-// Linked-documents panel: the chip lives on each message card; the drawer is one per
-// pane and gets re-scoped to whichever message opened it.
+// Linked-documents rail: the chip lives on each message card; the rail is one per pane and
+// stays open as messages change — it shows the whole conversation, `linkedDocsMail` only
+// anchors the highlight to whichever message opened it.
 const linkedDocsOpen = ref(false)
 const linkedDocsMail = ref<Mail | null>(null)
+const showThreadLinkDialog = ref(false)
 function openLinkedDocuments(mail: Mail) {
 	linkedDocsMail.value = mail
 	linkedDocsOpen.value = true
@@ -1172,6 +1193,14 @@ const openAttachment = (mailAttachments: Attachment[], idx: number) => {
 	attachments.value = mailAttachments
 	attachmentIndex.value = idx
 	showAttachmentViewer.value = true
+}
+
+// A rail attachment carries the mail it was found on — show it within that mail's own list so
+// the viewer's prev/next stays coherent with what the reader sees in the thread.
+const openRailAttachment = (att: Attachment & { mail_name: string }) => {
+	const owner = thread.value.find((m: Mail) => m.name === att.mail_name)
+	const list = owner ? filteredAttachments(owner) : [att]
+	openAttachment(list, Math.max(0, list.findIndex((a: Attachment) => a.blob_id === att.blob_id)))
 }
 
 const zippableAttachments = (mail: Mail) =>

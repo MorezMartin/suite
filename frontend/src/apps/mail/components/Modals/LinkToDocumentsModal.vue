@@ -89,7 +89,11 @@ import { X } from 'lucide-vue-next'
 import { raiseToast } from '@/apps/mail/utils'
 
 const show = defineModel<boolean>()
-const { mailName } = defineProps<{ mailName: string }>()
+const { mailName, mailNames = null } = defineProps<{
+	mailName?: string
+	/** When set, the whole discussion is linked: every one of these messages gets the links. */
+	mailNames?: string[] | null
+}>()
 
 interface DocumentLink {
 	doctype: string
@@ -211,9 +215,12 @@ const addRow = () => {
 
 const linkDocuments = createResource({
 	url: 'suite.mail.api.link.link_to_documents',
-	makeParams: () => ({ name: mailName, links: links.value }),
-	onSuccess: (data: { links: DocumentLink[] }) => {
-		raiseToast(__('Linked to {0} document(s).', [data.links.length]))
+	makeParams: () =>
+		mailNames?.length
+			? { names: JSON.stringify(mailNames), links: links.value }
+			: { name: mailName, links: links.value },
+	onSuccess: (data: { added: number; links: DocumentLink[] }) => {
+		raiseToast(__('Linked to {0} document(s).', [String(data.added)]))
 		show.value = false
 	},
 })

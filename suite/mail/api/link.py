@@ -331,34 +331,36 @@ def _validated_links(links: list) -> list[DocumentLink]:
     return validated
 
 
-@frappe.whitelist()
-def link_to_documents(name: str, links: list | str) -> dict:
-    """Links the Communication of a Mail Message to one or more documents (Timeline Links).
+def _messages_to_link(name: str | None, names: list | str | None) -> list:
+    """The (virtual) Mail Messages a link call covers: one (``name``) or a whole discussion
+    (``names`` — every message of the thread; linking a discussion is just linking its mails).
 
-    ``links`` is a list of ``{doctype, name, title?}`` (form-encoded JSON strings accepted).
-    Permissions, both enforced: the caller must own the JMAP account the message lives in
-    (reading a Mail Message is already gated per-account, and linking must not leak another
-    user's mail), and must be able to read every target document. Idempotent: re-linking an
-    existing pair does not duplicate the row. Returns the communication and its full link list.
+    Same per-message gate as reading the message at all: its JMAP account owner (or Administrator).
     """
 
-    if isinstance(links, str):
-        links = json.loads(links)
+    raw = names if names else [name]
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if not isinstance(raw, list):
+        frappe.throw(_("At least one message is required."))
 
-    if not links:
-        frappe.throw(_("At least one document link is required."))
+    docs = []
+    for message_name in [cstr(n) for n in raw if cstr(n)]:
+        doc = frappe.get_doc("Mail Message", message_name)
+        if doc.draft:
+            continue
+        get_user_for_jmap_account(doc.account, allow_system_manager=False, raise_exception=True)
+        if not split_message_id(doc.message_id):
+            continue
+        docs.append(doc)
 
-    doc = frappe.get_doc("Mail Message", name)
-    if doc.draft:
-        frappe.throw(_("Drafts cannot be linked to documents."))
+    if not docs:
+        frappe.throw(_("None of these messages can be linked to documents."))
+    return docs
 
-    # Same gate get_messages applies to reading the message at all: its owner (or Administrator).
-    get_user_for_jmap_account(doc.account, allow_system_manager=False, raise_exception=True)
 
-    if not split_message_id(doc.message_id):
-        frappe.throw(_("Mail Message {0} has no Message-ID and cannot be linked.").format(frappe.bold(name)))
-
-    links = _validated_links(links)
+def _link_one_message(doc, links: list[DocumentLink]) -> tuple:
+    """Links one message's Communication to ``links``; returns (communication, added count)."""
 
     fallback = None
     if links[0]["doctype"] != "Communication":
@@ -369,14 +371,16 @@ def link_to_documents(name: str, links: list | str) -> dict:
 
     communication = get_or_create_communication(doc, fallback_reference=fallback)
     if not communication:
-        frappe.throw(_("Could not create the Communication for this message."))
+        frappe.throw(_("Could not create the Communication for message {0}.").format(frappe.bold(doc.name)))
 
     existing = {(l.link_doctype, l.link_name) for l in communication.timeline_links}
     titles = {}
+    added = 0
     for link in links:
         if (link["doctype"], link["name"]) in existing:
             continue
         communication.add_link(link["doctype"], link["name"])
+        added += 1
         if link["title"]:
             titles[(link["doctype"], link["name"])] = link["title"]
 
@@ -389,8 +393,40 @@ def link_to_documents(name: str, links: list | str) -> dict:
             frappe.db.set_value("Communication Link", row.name, "link_title", title, update_modified=False)
             row.link_title = title
 
+    return communication, added
+
+
+@frappe.whitelist()
+def link_to_documents(name: str | None = None, links: list | str = None, names: list | str | None = None) -> dict:
+    """Links mails to documents (Timeline Links) — one message (``name``) or a whole discussion
+    (``names``: the linking is simply applied to every mail of the thread).
+
+    ``links`` is a list of ``{doctype, name, title?}`` (form-encoded JSON strings accepted).
+    Permissions, both enforced: the caller must own the JMAP account each message lives in
+    (reading a Mail Message is already gated per-account, and linking must not leak another
+    user's mail), and must be able to read every target document. Idempotent: re-linking an
+    existing pair does not duplicate the row. Returns the link list of the last communication
+    touched plus the count of links actually added.
+    """
+
+    if isinstance(links, str):
+        links = json.loads(links)
+
+    if not links:
+        frappe.throw(_("At least one document link is required."))
+
+    docs = _messages_to_link(name, names)
+    links = _validated_links(links)
+
+    communication = None
+    added = 0
+    for doc in docs:
+        communication, count = _link_one_message(doc, links)
+        added += count
+
     return {
         "communication": communication.name,
+        "added": added,
         "links": [
             {"doctype": l.link_doctype, "name": l.link_name, "title": l.link_title}
             for l in communication.timeline_links
@@ -453,7 +489,7 @@ def _linked_documents_view(communication) -> list[dict]:
             reference[0], ptype="read", doc=reference[1]
         ):
             seen.add(reference)
-            rows.append(_link_entry(reference[0], reference[1], None, "auto"))
+            rows.append(_link_entry(reference[0], reference[1], None, "auto", communication.creation))
 
     for link in communication.timeline_links:
         key = (link.link_doctype, link.link_name)
@@ -462,14 +498,14 @@ def _linked_documents_view(communication) -> list[dict]:
         if not frappe.has_permission(link.link_doctype, ptype="read", doc=link.link_name):
             continue
         seen.add(key)
-        rows.append(_link_entry(link.link_doctype, link.link_name, link.link_title, "manual"))
+        rows.append(_link_entry(link.link_doctype, link.link_name, link.link_title, "manual", link.creation))
 
     for row in rows:
         _attach_preview(row)
     return rows
 
 
-def _link_entry(doctype: str, name: str, title: str | None, source: str) -> dict:
+def _link_entry(doctype: str, name: str, title: str | None, source: str, creation=None) -> dict:
     meta = frappe.get_meta(doctype)
     display = (title or "").strip()
     if not display:
@@ -483,6 +519,9 @@ def _link_entry(doctype: str, name: str, title: str | None, source: str) -> dict
         "title": display or name,
         "doctype_label": meta.get("label") or doctype,
         "source": source,
+        # The panel sorts by this (ISO strings sort correctly); a link's own row date, or the
+        # Communication's for a reference that has no row yet.
+        "creation": str(creation) if creation else None,
     }
 
 
@@ -545,12 +584,45 @@ def get_message_linked_documents(name: str) -> list[dict]:
 
 
 @frappe.whitelist()
-def unlink_document(name: str, doctype: str, docname: str | None = None) -> list[dict]:
-    """Removes one link between a Mail Message and a document.
+def get_thread_linked_documents(account: str, thread_id: str) -> list[dict]:
+    """The panel's payload for a whole discussion: documents linked to any of its messages.
+
+    The panel shows the thread's view — the linking itself stays per-message (one Timeline Link
+    row per message's Communication). Rows of different messages collapse into one per document
+    (first mention wins); every row keeps the name of the mail it was found on so the panel can
+    point back at it. get_thread_email_ids/get_messages already gate on the account's owner.
+    """
+
+    from suite.mail.doctype.mail_message.mail_message import fetch_thread
+
+    rows: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for message in fetch_thread(account, thread_id):
+        name = message.get("name") if isinstance(message, dict) else getattr(message, "name", None)
+        if not name:
+            continue
+        communication = get_communication_for_message(frappe.get_doc("Mail Message", name))
+        if not communication:
+            continue
+        for row in _linked_documents_view(communication):
+            key = (row["doctype"], row["name"])
+            if key in seen:
+                continue
+            seen.add(key)
+            row["mail"] = name
+            rows.append(row)
+    return rows
+
+
+@frappe.whitelist()
+def unlink_document(name: str | None = None, doctype: str = "", docname: str | None = None, names: list | str | None = None) -> dict:
+    """Removes a document link from one Mail Message (``name``) or a whole discussion (``names``).
 
     Accepts the panel's naming (``doctype``/``name``) and core's (``doctype``/``docname``).
-    Deleting a timeline row lifts the link everywhere it surfaced; when the deleted row was
-    the last one for what the Communication also references, the reference fields are
+    With ``names`` — the whole-discussion panel — the document is unlinked from every message
+    of the thread that carries it: a discussion linked as a whole unlinks as a whole, one row
+    per message. Deleting a timeline row lifts the link everywhere it surfaced; when the deleted
+    row was the last one for what the Communication also references, the reference fields are
     cleared too — the unlink must not re-surface the document through the reference.
     Unlinking a reference with no timeline row (pure auto-link) just clears the reference.
     A link to the Communication itself (a mail pointed at a mail) is refused: it is the
@@ -560,33 +632,50 @@ def unlink_document(name: str, doctype: str, docname: str | None = None) -> list
     if not docname:
         frappe.throw(_("A document name is required."))
 
-    doc = frappe.get_doc("Mail Message", name)
-    get_user_for_jmap_account(doc.account, allow_system_manager=False, raise_exception=True)
-
-    communication = get_communication_for_message(doc)
-    if not communication:
-        frappe.throw(_("This message has no linked documents."))
-
     if doctype == "Communication":
         frappe.throw(_("A mail cannot be unlinked from the mail it threads to."))
 
-    # Mirror the linking gate: only a user who can read the target may unlink it — dropping
-    # a row would otherwise edit a timeline the caller cannot see.
-    frappe.has_permission(doctype, ptype="read", doc=docname, throw=True)
+    raw = names if names else [name]
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if not isinstance(raw, list):
+        frappe.throw(_("At least one message is required."))
 
-    targets = [l for l in communication.timeline_links if l.link_doctype == doctype and l.link_name == docname]
-    was_reference = (communication.reference_doctype, communication.reference_name) == (doctype, docname)
-    if not targets and not was_reference:
+    removed = 0
+    last_communication = None
+    for message_name in [cstr(n) for n in raw if cstr(n)]:
+        doc = frappe.get_doc("Mail Message", message_name)
+        get_user_for_jmap_account(doc.account, allow_system_manager=False, raise_exception=True)
+
+        communication = get_communication_for_message(doc)
+        if not communication:
+            continue
+
+        # Mirror the linking gate: only a user who can read the target may unlink it — dropping
+        # a row would otherwise edit a timeline the caller cannot see.
+        frappe.has_permission(doctype, ptype="read", doc=docname, throw=True)
+
+        targets = [l for l in communication.timeline_links if l.link_doctype == doctype and l.link_name == docname]
+        was_reference = (communication.reference_doctype, communication.reference_name) == (doctype, docname)
+        if not targets and not was_reference:
+            continue
+
+        for l in targets:
+            communication.timeline_links.remove(l)
+        if was_reference:
+            communication.reference_doctype = None
+            communication.reference_name = None
+
+        communication.save(ignore_permissions=True)
+        removed += 1
+        last_communication = communication
+
+    if not removed:
         frappe.throw(_("This message is not linked to {0} {1}.").format(frappe.bold(doctype), frappe.bold(docname)))
 
-    for l in targets:
-        communication.timeline_links.remove(l)
-    if was_reference:
-        communication.reference_doctype = None
-        communication.reference_name = None
-
-    communication.save(ignore_permissions=True)
-    return _linked_documents_view(communication)
+    # The panel refreshes from the remaining links; ``removed`` tells the thread-scope caller
+    # (and tests) how many messages the unlink actually lifted.
+    return {"removed": removed, "links": _linked_documents_view(last_communication)}
 
 
 @frappe.whitelist()
