@@ -110,3 +110,4 @@ suite.suite_core.patches.remove_desk_access_from_suite_roles
 suite.suite_core.patches.rename_suite_cloud_credentials
 suite.suite_core.patches.drop_notification_email_account
 suite.drive.patches.webdav_property_index
+suite.mail.patches.reload_mail_settings_sso_fields

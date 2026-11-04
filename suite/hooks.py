@@ -259,6 +259,7 @@ doc_events = {
             # deletion needs.
             "suite.mail.events.delete_push_subscriptions_on_disable",
             "suite.mail.events.update_account_password",
+            "suite.mail.sso_otp.sync_user_otp",
             "suite.mail.events.clear_sessions_on_disable",
             "suite.mail.events.apply_disabled_account_role",
             "suite.mail.events.remove_disabled_account_role",
@@ -296,6 +297,9 @@ on_login = ["suite.mail.doctype.push_subscription.push_subscription.on_login"]
 # Scheduled Tasks (per-frequency lists combined; cron keys de-duplicated)
 # ============================================================================
 scheduler_events = {
+    "weekly": [
+        "suite.mail.sso_otp.audit_otp_drift",
+    ],
     "daily": [
         # meet
         "suite.meet.api.recording.cleanup_failed_recordings",

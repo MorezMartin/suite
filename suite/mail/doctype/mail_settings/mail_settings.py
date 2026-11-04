@@ -39,6 +39,8 @@ class MailSettings(Document):
         exchange_max_import: DF.Int
         expand_mailing_list_participants: DF.Check
         jmap_push_auth: DF.Password | None
+        sso_admin_email: DF.Data | None
+        sso_admin_secret: DF.Password | None
         jmap_push_p256dh: DF.Data | None
         jmap_push_private_key: DF.Password | None
         log_file_count: DF.Int

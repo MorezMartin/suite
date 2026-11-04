@@ -43,6 +43,10 @@
   "jmap_push_private_key",
   "jmap_push_p256dh",
   "advanced_tab",
+  "sso_section",
+  "sso_admin_email",
+  "column_break_sso1",
+  "sso_admin_secret",
   "limits_section",
   "exchange_max_export",
   "exchange_max_import",
@@ -474,6 +478,27 @@
   {
    "fieldname": "column_break_sbzt",
    "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "sso_section",
+   "fieldtype": "Section Break",
+   "label": "SSO / Directory Admin"
+  },
+  {
+   "fieldname": "sso_admin_email",
+   "fieldtype": "Data",
+   "label": "SSO Admin Email",
+   "description": "Technical Stalwart account (role: User + sysAccountGet/Query/Update). Empty disables OTP sync."
+  },
+  {
+   "fieldname": "column_break_sso1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "sso_admin_secret",
+   "fieldtype": "Password",
+   "label": "SSO Admin Secret",
+   "description": "Password or app password of the SSO admin account. Stored encrypted."
   }
  ],
  "index_web_pages_for_search": 1,
