@@ -79,7 +79,11 @@ def get_user_totp_secret(user: str) -> str | None:
     field — read as a fallback.
     """
 
-    from frappe.defaults import get_default
+    # Frappe v16 stores the secret under the ``__2fa`` parent, through
+    # ``frappe.twofactor.get_default``/``set_default`` — read it back with the very
+    # same helper so the key, the parent and the encryption stay symmetric with
+    # the writer. ``frappe.defaults`` has no ``get_default`` (ImportError).
+    from frappe.twofactor import get_default
 
     if secret := get_default(f"{user}_otpsecret"):
         from frappe.utils.password import decrypt
