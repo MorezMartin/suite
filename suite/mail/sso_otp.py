@@ -11,12 +11,14 @@ Stalwart JMAP administration API (``urn:stalwart:jmap``) directly, using a
 dedicated technical account configured in Mail Settings.
 
 Stalwart technical account (documented requirement, outside this code):
-    Create e.g. ``sso-sync@mhtraiteur.fr`` with a *custom* role granting:
-        sysAccountGet, sysAccountQuery, sysAccountUpdate
-    plus the regular ``User`` role permissions: Stalwart refuses any account
-    mutation unless the caller holds *every* effective permission of the
-    target account (see docs/auth/authorization/permissions, "Granting
-    permissions to other accounts"). Do not use Administrator.
+    Create e.g. ``sso-sync@<domain>`` carrying the built-in ``User`` role plus
+    ``Tenant Administrator`` (live-validated 03/11: with these two roles the
+    account can list and patch every account of its tenant, including an Admin
+    user's credential). Do NOT use the global Administrator, and do NOT rely on
+    ``sysAccount*`` permissions alone — Stalwart answers "You are not an owner
+    of account <directory>" unless the caller is a tenant admin; JMAP calls
+    here deliberately omit ``accountId`` so they run with the technical
+    account's own (tenant-scoped) identity.
 
 Write discipline (validated against the live server before this design):
     - ``otpAuth`` is a **plain string** holding the ``otpauth://`` provisioning
