@@ -192,12 +192,13 @@ PRIVILEGED_ROLE_TYPES = frozenset({"Admin", "System Administrator", "Tenant Admi
 def _is_privileged(account: dict[str, Any]) -> bool:
     """Whether the Stalwart account carries a built-in admin role type.
 
-    Such accounts are never patched by the sync (see module docstring): their
-    operator enters the TOTP secret on Stalwart manually. Custom roles that
-    merely *reference* an administrative role through role ids are not sniffed
-    here — the minimal technical role cannot read role objects, and Stalwart's
-    own ownership check refuses their credential writes anyway (logged, not
-    raised).
+    This skip is the ONLY guard: live-probed, a technical account holding
+    sysAccountUpdate can patch ANY account's credential (including an Admin's
+    otpAuth) — Stalwart does not enforce an ownership check on that path. The
+    privileged boundary is therefore code-enforced, not server-enforced; do
+    not remove it while granting the technical account sysAccountUpdate.
+    Custom roles that merely reference an administrative role through role ids
+    are not sniffed (the technical role cannot read role objects).
     """
 
     roles = account.get("roles") or {}
