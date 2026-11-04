@@ -12,13 +12,16 @@ dedicated technical account configured in Mail Settings.
 
 Stalwart technical account (documented requirement, outside this code):
     Create e.g. ``sso-sync@<domain>`` carrying the built-in ``User`` role plus
-    ``Tenant Administrator`` (live-validated 03/11: with these two roles the
-    account can list and patch every account of its tenant, including an Admin
-    user's credential). Do NOT use the global Administrator, and do NOT rely on
-    ``sysAccount*`` permissions alone — Stalwart answers "You are not an owner
-    of account <directory>" unless the caller is a tenant admin; JMAP calls
-    here deliberately omit ``accountId`` so they run with the technical
-    account's own (tenant-scoped) identity.
+    one minimal custom role with exactly ``sysAccountGet``, ``sysAccountQuery``
+    and ``sysAccountUpdate`` — nothing else. Deliberately NOT ``Tenant
+    Administrator``: pushing an OTP onto an Admin account would require it, and
+    granting tenant-wide write on privileged accounts for a convenience sync is
+    a wider blast radius than the feature is worth. Privileged accounts (Admin
+    / Tenant / System Administrator roles on Stalwart) are therefore **skipped**
+    with a log line: someone holding admin rights completes the Frappe 2FA
+    setup and enters the TOTP secret on Stalwart themselves (one QR, same
+    secret both sides). JMAP calls here deliberately omit ``accountId`` so they
+    run with the technical account's own (tenant-scoped) identity.
 
 Write discipline (validated against the live server before this design):
     - ``otpAuth`` is a **plain string** holding the ``otpauth://`` provisioning
@@ -86,12 +89,18 @@ def get_user_totp_secret(user: str) -> str | None:
     from frappe.twofactor import get_default
 
     if secret := get_default(f"{user}_otpsecret"):
-        from frappe.utils.password import decrypt
+        secret = secret.strip()
+        # v16 ``get_default`` hands back the plaintext base32 (decryption happens
+        # inside frappe.db.get_default). Older 2FA data may still be a Fernet
+        # token: decrypt only that shape, never an already-decoded secret.
+        if secret.startswith("gAAAA"):
+            from frappe.utils.password import decrypt
 
-        try:
-            return decrypt(secret, key=f"{user}.otpsecret")
-        except Exception:
-            return None
+            try:
+                return decrypt(secret, key=f"{user}.otpsecret")
+            except Exception:
+                return None
+        return secret or None
 
     from frappe.utils.password import get_decrypted_password
 
@@ -177,6 +186,24 @@ def _has_otp(account: dict[str, Any]) -> bool:
     return False
 
 
+PRIVILEGED_ROLE_TYPES = frozenset({"Admin", "System Administrator", "Tenant Administrator"})
+
+
+def _is_privileged(account: dict[str, Any]) -> bool:
+    """Whether the Stalwart account carries a built-in admin role type.
+
+    Such accounts are never patched by the sync (see module docstring): their
+    operator enters the TOTP secret on Stalwart manually. Custom roles that
+    merely *reference* an administrative role through role ids are not sniffed
+    here — the minimal technical role cannot read role objects, and Stalwart's
+    own ownership check refuses their credential writes anyway (logged, not
+    raised).
+    """
+
+    roles = account.get("roles") or {}
+    return str(roles.get("@type") or "") in PRIVILEGED_ROLE_TYPES
+
+
 def build_otpauth_url(email: str, secret_b32: str) -> str:
     """Build the otpauth:// provisioning URL pushed to Stalwart."""
 
@@ -222,6 +249,14 @@ def sync_otp_for_user(user: str, enable: bool) -> None:
         frappe.log_error(
             title="SSO OTP sync skipped: no Stalwart account",
             message=f"No Stalwart account found for {email} (user {user}).",
+        )
+        return
+
+    if _is_privileged(account):
+        frappe.log_error(
+            title="SSO OTP sync skipped: privileged Stalwart account",
+            message=f"Stalwart account for {email} holds an administrative role; the sync "
+            "deliberately never writes privileged credentials. Complete 2FA on Stalwart manually.",
         )
         return
 
