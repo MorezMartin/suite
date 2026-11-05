@@ -11,17 +11,13 @@ Stalwart JMAP administration API (``urn:stalwart:jmap``) directly, using a
 dedicated technical account configured in Mail Settings.
 
 Stalwart technical account (documented requirement, outside this code):
-    Create e.g. ``sso-sync@<domain>`` carrying the built-in ``User`` role plus
-    one minimal custom role with exactly ``sysAccountGet``, ``sysAccountQuery``
-    and ``sysAccountUpdate`` — nothing else. Deliberately NOT ``Tenant
-    Administrator``: pushing an OTP onto an Admin account would require it, and
-    granting tenant-wide write on privileged accounts for a convenience sync is
-    a wider blast radius than the feature is worth. Privileged accounts (Admin
-    / Tenant / System Administrator roles on Stalwart) are therefore **skipped**
-    with a log line: someone holding admin rights completes the Frappe 2FA
-    setup and enters the TOTP secret on Stalwart themselves (one QR, same
-    secret both sides). JMAP calls here deliberately omit ``accountId`` so they
-    run with the technical account's own (tenant-scoped) identity.
+    The sync rides on the site's master mail account — the same Stalwart admin
+    account the mail provisioning already uses (e.g. ``frappe@<domain>``, with
+    its password kept in Mail Settings). It is an administrator of its tenant
+    by nature of provisioning mail accounts; the OTP sync deliberately adds no
+    second service account and skips nothing: every user's OTP is mirrored,
+    administrators included. JMAP calls here deliberately omit ``accountId``
+    so they run with the technical account's own (tenant-scoped) identity.
 
 Write discipline (validated against the live server before this design):
     - ``otpAuth`` is a **plain string** holding the ``otpauth://`` provisioning
@@ -186,25 +182,6 @@ def _has_otp(account: dict[str, Any]) -> bool:
     return False
 
 
-PRIVILEGED_ROLE_TYPES = frozenset({"Admin", "System Administrator", "Tenant Administrator"})
-
-
-def _is_privileged(account: dict[str, Any]) -> bool:
-    """Whether the Stalwart account carries a built-in admin role type.
-
-    This skip is the ONLY guard: live-probed, a technical account holding
-    sysAccountUpdate can patch ANY account's credential (including an Admin's
-    otpAuth) — Stalwart does not enforce an ownership check on that path. The
-    privileged boundary is therefore code-enforced, not server-enforced; do
-    not remove it while granting the technical account sysAccountUpdate.
-    Custom roles that merely reference an administrative role through role ids
-    are not sniffed (the technical role cannot read role objects).
-    """
-
-    roles = account.get("roles") or {}
-    return str(roles.get("@type") or "") in PRIVILEGED_ROLE_TYPES
-
-
 def build_otpauth_url(email: str, secret_b32: str) -> str:
     """Build the otpauth:// provisioning URL pushed to Stalwart."""
 
@@ -250,14 +227,6 @@ def sync_otp_for_user(user: str, enable: bool) -> None:
         frappe.log_error(
             title="SSO OTP sync skipped: no Stalwart account",
             message=f"No Stalwart account found for {email} (user {user}).",
-        )
-        return
-
-    if _is_privileged(account):
-        frappe.log_error(
-            title="SSO OTP sync skipped: privileged Stalwart account",
-            message=f"Stalwart account for {email} holds an administrative role; the sync "
-            "deliberately never writes privileged credentials. Complete 2FA on Stalwart manually.",
         )
         return
 
